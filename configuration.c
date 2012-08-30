@@ -48,6 +48,9 @@
 #define CFG_PEM_FILE "pem-file"
 #define CFG_BACKEND_CONNECT_TIMEOUT "backend-connect-timeout"
 #define CFG_SSL_HANDSHAKE_TIMEOUT "ssl-handshake-timeout"
+#define CFG_RECV_BUFSIZE "recv-bufsize"
+#define CFG_SEND_BUFSIZE "send-bufsize"
+#define CFG_LOG_FILENAME "log-filename"
 
 #ifdef USE_SHARED_CACHE
   #define CFG_SHARED_CACHE "shared-cache"
@@ -150,6 +153,11 @@ stud_config * config_new (void) {
 
   r->BACKEND_CONNECT_TIMEOUT = 30;
   r->SSL_HANDSHAKE_TIMEOUT = 30;
+
+  r->RECV_BUFSIZE = -1;
+  r->SEND_BUFSIZE = -1;
+
+  r->LOG_FILENAME = NULL;
 
   return r;
 }
@@ -698,6 +706,17 @@ void config_param_validate (char *k, char *v, stud_config *cfg, char *file, int 
   }
   else if (strcmp(k, CFG_SSL_HANDSHAKE_TIMEOUT) == 0) {
       r = config_param_val_int_pos(v, &cfg->SSL_HANDSHAKE_TIMEOUT);
+  }
+  else if (strcmp(k, CFG_RECV_BUFSIZE) == 0) {
+      r = config_param_val_int_pos(v, &cfg->RECV_BUFSIZE);
+  }
+  else if (strcmp(k, CFG_SEND_BUFSIZE) == 0) {
+      r = config_param_val_int_pos(v, &cfg->SEND_BUFSIZE);
+  }
+  else if (strcmp(k, CFG_LOG_FILENAME) == 0) {
+      if (v != NULL && strlen(v) > 0) {
+	  config_assign_str(&cfg->LOG_FILENAME, v);
+      }
   }
   else {
     fprintf(
