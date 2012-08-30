@@ -1794,19 +1794,22 @@ void openssl_check_version() {
 int main(int argc, char **argv) {
     // initialize configuration
     CONFIG = config_new();
+
+    // parse command line
+    config_parse_cli(argc, argv, CONFIG);
+
     if (CONFIG->LOG_FILENAME) {
 	if ((logf = fopen(CONFIG->LOG_FILENAME, "a")) == NULL) {
 	    ERR("FATAL: Unable to open log file: %s: %s\n", CONFIG->LOG_FILENAME, strerror(errno));
 	    exit(2);
 	}
+	fstat(fileno(logf), &logf_st);
+	logf_check_t = time(NULL);
     } else {
 	logf = stdout;
 	setbuf(logf, NULL);
     }
-    
-    // parse command line
-    config_parse_cli(argc, argv, CONFIG);
-    
+
     create_workers = 1;
 
     openssl_check_version();
