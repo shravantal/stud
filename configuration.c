@@ -120,8 +120,8 @@ stud_config * config_new (void) {
   r->WRITE_IP_OCTET     = 0;
   r->WRITE_PROXY_LINE   = 0;
   r->CHROOT             = NULL;
-  r->UID                = 0;
-  r->GID                = 0;
+  r->UID                = -1;
+  r->GID                = -1;
   r->FRONT_IP           = NULL;
   r->FRONT_PORT         = strdup("8443");
   r->BACK_IP            = strdup("127.0.0.1");
@@ -1285,11 +1285,6 @@ void config_parse_cli(int argc, char **argv, stud_config *cfg) {
 
   if (cfg->WRITE_IP_OCTET && cfg->WRITE_PROXY_LINE)
     config_die("Options --write-ip and --write-proxy are mutually exclusive.");
-
-  if (cfg->DAEMONIZE) {
-    cfg->SYSLOG = 1;
-    cfg->QUIET = 1;
-  }
 
 #ifdef USE_SHARED_CACHE
   if (cfg->SHCUPD_IP != NULL && ! cfg->SHARED_CACHE)
