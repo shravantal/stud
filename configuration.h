@@ -31,6 +31,13 @@ typedef enum {
     SSL_CLIENT
 } PROXY_MODE;
 
+struct stud_config_addr {
+    struct stud_config_addr* next;
+    char* IP;
+    char* PORT;
+    struct addrinfo *addr;
+};
+
 /* configuration structure */
 struct __stud_config {
     ENC_TYPE ETYPE;
@@ -42,8 +49,8 @@ struct __stud_config {
     int GID;
     char *FRONT_IP;
     char *FRONT_PORT;
-    char *BACK_IP;
-    char *BACK_PORT;
+    struct stud_config_addr* BACKADDR;
+    struct stud_config_addr* BACKADDR_DEFAULT;
     long NCORES;
     char *CERT_FILE;
     char *CIPHER_SUITE;

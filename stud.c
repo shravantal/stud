@@ -83,7 +83,7 @@
 
 /* Globals */
 static struct ev_loop *loop;
-static struct addrinfo *backaddr;
+static struct stud_config_addr* backaddr;
 static pid_t master_pid;
 static ev_io listener;
 static int listener_socket;
@@ -148,6 +148,7 @@ typedef struct proxystate {
 
     int fd_up;            /* Upstream (client) socket */
     int fd_down;          /* Downstream (backend) socket */
+    struct stud_config_addr* addr_down;
 
     int want_shutdown:1;  /* Connection is half-shutdown */
     int handshaked:1;     /* Initial handshake happened */
@@ -773,7 +774,7 @@ static int create_main_socket() {
 	setsockopt(s, SOL_SOCKET, SO_RCVBUF, &CONFIG->RECV_BUFSIZE, sizeof(CONFIG->RECV_BUFSIZE));
     }
     if (CONFIG->SEND_BUFSIZE > 0) {
-	setsockopt(s, SOL_SOCKET, SO_RCVBUF, &CONFIG->SEND_BUFSIZE, sizeof(CONFIG->SEND_BUFSIZE));
+	setsockopt(s, SOL_SOCKET, SO_SNDBUF, &CONFIG->SEND_BUFSIZE, sizeof(CONFIG->SEND_BUFSIZE));
     }
 
     if (bind(s, ai->ai_addr, ai->ai_addrlen)) {
@@ -795,10 +796,25 @@ static int create_main_socket() {
     return s;
 }
 
+static struct stud_config_addr* get_backaddr ()
+{
+    struct stud_config_addr* a;
+
+    if (!backaddr) {
+	backaddr = CONFIG->BACKADDR;
+	if (!backaddr) {
+	    backaddr = CONFIG->BACKADDR_DEFAULT;
+	}
+    }
+    a = backaddr;
+    backaddr = backaddr->next;
+    return a;
+}
+
 /* Initiate a clear-text nonblocking connect() to the backend IP on behalf
  * of a newly connected upstream (encrypted) client*/
-static int create_back_socket() {
-    int s = socket(backaddr->ai_family, SOCK_STREAM, IPPROTO_TCP);
+static int create_back_socket(const struct stud_config_addr* addr) {
+    int s = socket(addr->addr->ai_family, SOCK_STREAM, IPPROTO_TCP);
 
     if (s == -1)
       return -1;
@@ -865,16 +881,17 @@ static void handle_socket_errno(proxystate *ps, int backend) {
     shutdown_proxy(ps, SHUTDOWN_CLEAR);
 }
 /* Start connect to backend */
-static void start_connect(proxystate *ps) {
+static int start_connect(proxystate *ps) {
     int t = 1;
-    t = connect(ps->fd_down, backaddr->ai_addr, backaddr->ai_addrlen);
+    t = connect(ps->fd_down, ps->addr_down->addr->ai_addr, ps->addr_down->addr->ai_addrlen);
     if (t == 0 || errno == EINPROGRESS || errno == EINTR) {
         ev_io_start(loop, &ps->ev_w_connect);
         ev_timer_start(loop, &ps->ev_t_connect);
-        return ;
+        return 1;
     }
     ERR("{backend-connect}: %s\n", strerror(errno));
     shutdown_proxy(ps, SHUTDOWN_HARD);
+    return 0;
 }
 
 /* Read some data from the backend when libev says data is available--
@@ -953,7 +970,7 @@ static void handle_connect(struct ev_loop *loop, ev_io *w, int revents) {
     (void) revents;
     int t;
     proxystate *ps = (proxystate *)w->data;
-    t = connect(ps->fd_down, backaddr->ai_addr, backaddr->ai_addrlen);
+    t = connect(ps->fd_down, ps->addr_down->addr->ai_addr, ps->addr_down->addr->ai_addrlen);
     if (!t || errno == EISCONN || !errno) {
         ev_io_stop(loop, &ps->ev_w_connect);
         ev_timer_stop(loop, &ps->ev_t_connect);
@@ -1077,7 +1094,9 @@ static void end_handshake(proxystate *ps) {
             }
         }
 	/* start connect now */
-        start_connect(ps);
+        if (!start_connect(ps)) {
+            return;
+        }
     }
     else {
         /* stud used in client mode, keep client session ) */
@@ -1318,7 +1337,8 @@ static void handle_accept(struct ev_loop *loop, ev_io *w, int revents) {
     setnonblocking(client);
     settcpkeepalive(client);
 
-    int back = create_back_socket();
+    struct stud_config_addr* backaddr = get_backaddr();
+    int back = create_back_socket(backaddr);
 
     if (back == -1) {
         close(client);
@@ -1340,6 +1360,7 @@ static void handle_accept(struct ev_loop *loop, ev_io *w, int revents) {
 
     ps->fd_up = client;
     ps->fd_down = back;
+    ps->addr_down = backaddr;
     ps->ssl = ssl;
     ps->want_shutdown = 0;
     ps->clear_connected = 0;
@@ -1437,7 +1458,8 @@ static void handle_clear_accept(struct ev_loop *loop, ev_io *w, int revents) {
     setnonblocking(client);
     settcpkeepalive(client);
 
-    int back = create_back_socket();
+    struct stud_config_addr* backaddr = get_backaddr();
+    int back = create_back_socket(backaddr);
 
     if (back == -1) {
         close(client);
@@ -1461,6 +1483,7 @@ static void handle_clear_accept(struct ev_loop *loop, ev_io *w, int revents) {
 
     ps->fd_up = client;
     ps->fd_down = back;
+    ps->addr_down = backaddr;
     ps->ssl = ssl;
     ps->want_shutdown = 0;
     ps->clear_connected = 1;
@@ -1552,19 +1575,6 @@ void drop_privileges() {
 
 
 void init_globals() {
-    /* backaddr */
-    struct addrinfo hints;
-    memset(&hints, 0, sizeof hints);
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_flags = 0;
-    const int gai_err = getaddrinfo(CONFIG->BACK_IP, CONFIG->BACK_PORT,
-                                    &hints, &backaddr);
-    if (gai_err != 0) {
-        ERR("{getaddrinfo}: [%s]", gai_strerror(gai_err));
-        exit(1);
-    }
-
 #ifdef USE_SHARED_CACHE
     if (CONFIG->SHARED_CACHE) {
         /* cache update peers addresses */

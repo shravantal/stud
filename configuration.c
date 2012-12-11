@@ -18,6 +18,8 @@
 #include <grp.h>
 #include <sys/stat.h>
 #include <syslog.h>
+#include <sys/socket.h>
+#include <netdb.h>
 
 #include "configuration.h"
 #include "version.h"
@@ -105,6 +107,8 @@ void config_die (char *fmt, ...) {
   exit(1);
 }
 
+int config_param_val_addr (char* ip, char* port, struct stud_config_addr** cfg);
+
 stud_config * config_new (void) {
   stud_config *r = NULL;
   r = malloc(sizeof(stud_config));
@@ -124,8 +128,9 @@ stud_config * config_new (void) {
   r->GID                = -1;
   r->FRONT_IP           = NULL;
   r->FRONT_PORT         = strdup("8443");
-  r->BACK_IP            = strdup("127.0.0.1");
-  r->BACK_PORT          = strdup("8000");
+  r->BACKADDR		= NULL;
+  r->BACKADDR_DEFAULT	= NULL;
+  config_param_val_addr(strdup("127.0.0.1"), strdup("8000"), &r->BACKADDR_DEFAULT);
   r->NCORES             = 1;
   r->CERT_FILE          = NULL;
   r->CIPHER_SUITE       = NULL;
@@ -170,8 +175,14 @@ void config_destroy (stud_config *cfg) {
   if (cfg->CHROOT != NULL) free(cfg->CHROOT);
   if (cfg->FRONT_IP != NULL) free(cfg->FRONT_IP);
   if (cfg->FRONT_PORT != NULL) free(cfg->FRONT_PORT);
-  if (cfg->BACK_IP != NULL) free(cfg->BACK_IP);
-  if (cfg->BACK_PORT != NULL) free(cfg->BACK_PORT);
+  while (cfg->BACKADDR != NULL) {
+      struct stud_config_addr* a = cfg->BACKADDR;
+      cfg->BACKADDR = cfg->BACKADDR->next;
+      free(a->IP);
+      free(a->PORT);
+      free(a->addr);
+      free(a);
+  }
   if (cfg->CERT_FILE != NULL) free(cfg->CERT_FILE);
   if (cfg->CIPHER_SUITE != NULL) free(cfg->CIPHER_SUITE);
   if (cfg->ENGINE != NULL) free(cfg->ENGINE);
@@ -436,6 +447,30 @@ int config_param_val_intl_pos (char *str, long int *dst) {
   return 1;
 }
 
+int config_param_val_addr (char* ip, char* port, struct stud_config_addr** cfg)
+{
+    /* backaddr */
+    struct addrinfo hints;
+    struct addrinfo* addr;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = 0;
+    const int gai_err = getaddrinfo(ip, port, &hints, &addr);
+    if (gai_err != 0) {
+	config_error_set("Unable to resolve backend address: %s:%s: %s", ip, port, gai_strerror(gai_err));
+	return 0;
+    } else {
+	struct stud_config_addr* ipp = (struct stud_config_addr*)malloc(sizeof(*ipp));
+	ipp->addr = addr;
+	ipp->IP = ip;
+	ipp->PORT = port;
+	ipp->next = *cfg;
+	*cfg = ipp;
+    }
+    return 1;
+}
+
 #ifdef USE_SHARED_CACHE
 /* Parse mcast and ttl options */
 int config_param_shcupd_mcastif (char *str, char **iface, char **ttl) {
@@ -564,7 +599,13 @@ void config_param_validate (char *k, char *v, stud_config *cfg, char *file, int 
     r = config_param_host_port_wildcard(v, &cfg->FRONT_IP, &cfg->FRONT_PORT, 1);
   }
   else if (strcmp(k, CFG_BACKEND) == 0) {
-    r = config_param_host_port(v, &cfg->BACK_IP, &cfg->BACK_PORT);
+    char* ip;
+    char* port;
+    if (!config_param_host_port(v, &ip, &port)) {
+	r = 0;
+    } else {
+	config_param_val_addr(ip, port, &cfg->BACKADDR);
+    }
   }
   else if (strcmp(k, CFG_WORKERS) == 0) {
     r = config_param_val_intl_pos(v, &cfg->NCORES);
@@ -888,7 +929,8 @@ void config_print_usage_fd (char *prog, stud_config *cfg, FILE *out) {
   fprintf(out, "SOCKET:\n");
   fprintf(out, "\n");
   fprintf(out, "  --client                    Enable client proxy mode\n");
-  fprintf(out, "  -b  --backend=HOST,PORT     Backend [connect] (default is \"%s\")\n", config_disp_hostport(cfg->BACK_IP, cfg->BACK_PORT));
+  fprintf(out, "  -b  --backend=HOST,PORT     Backend [connect] (default is \"%s\")\n", config_disp_hostport(cfg->BACKADDR_DEFAULT->IP,
+													     cfg->BACKADDR_DEFAULT->PORT));
   fprintf(out, "  -f  --frontend=HOST,PORT    Frontend [bind] (default is \"%s\")\n", config_disp_hostport(cfg->FRONT_IP, cfg->FRONT_PORT));
 
 #ifdef USE_SHARED_CACHE
@@ -960,12 +1002,17 @@ void config_print_default (FILE *fd, stud_config *cfg) {
   fprintf(fd, FMT_QSTR, CFG_FRONTEND, config_disp_hostport(cfg->FRONT_IP, cfg->FRONT_PORT));
   fprintf(fd, "\n");
 
-  fprintf(fd, "# Upstream server address. REQUIRED.\n");
+  fprintf(fd, "# Downstream server address. REQUIRED.\n");
   fprintf(fd, "#\n");
   fprintf(fd, "# type: string\n");
   fprintf(fd, "# syntax: [HOST]:PORT.\n");
-  fprintf(fd, FMT_QSTR, CFG_BACKEND, config_disp_hostport(cfg->BACK_IP, cfg->BACK_PORT));
-  fprintf(fd, "\n");
+  {
+      struct stud_config_addr* a;
+      for (a = cfg->BACKADDR ?: cfg->BACKADDR_DEFAULT; a; a = a->next) {
+	  fprintf(fd, FMT_QSTR, CFG_BACKEND, config_disp_hostport(a->IP, a->PORT));
+	  fprintf(fd, "\n");
+      }
+  }
 
   fprintf(fd, "# SSL x509 certificate file. REQUIRED.\n");
   fprintf(fd, "#\n");
