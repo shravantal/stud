@@ -36,6 +36,7 @@ void ringbuffer_init(ringbuffer *rb) {
     rb->head = &rb->slots[0];
     rb->tail = &rb->slots[0];
     rb->used = 0;
+    rb->bytes_written = 0;
     int x;
     for (x=0; x<RING_SLOTS; x++)
         rb->slots[x].next = &(rb->slots[(x + 1) % RING_SLOTS]);
@@ -78,6 +79,7 @@ char * ringbuffer_write_ptr(ringbuffer *rb) {
 void ringbuffer_write_append(ringbuffer *rb, int length) {
     assert(rb->used < RING_SLOTS);
 
+    rb->bytes_written += length;
     rb->used++;
 
     rb->tail->ptr = rb->tail->data;
@@ -108,3 +110,16 @@ int ringbuffer_is_full(ringbuffer *rb) {
     return rb->used == RING_SLOTS;
 }
 
+int ringbuffer_bytes_written(const ringbuffer *rb) {
+    return rb->bytes_written;
+}
+
+int ringbuffer_bytes_pending(const ringbuffer *rb) {
+    int bytes = 0;
+    bufent *b = rb->head;
+    while (b != rb->tail) {
+	bytes += b->left;
+	b = b->next;
+    }
+    return bytes;
+}

@@ -41,6 +41,7 @@
 #define CFG_USER "user"
 #define CFG_GROUP "group"
 #define CFG_QUIET "quiet"
+#define CFG_VERBOSE "verbose"
 #define CFG_SYSLOG "syslog"
 #define CFG_SYSLOG_FACILITY "syslog-facility"
 #define CFG_PARAM_SYSLOG_FACILITY 11015
@@ -150,6 +151,7 @@ stud_config * config_new (void) {
 #endif
 
   r->QUIET              = 0;
+  r->VERBOSE              = 0;
   r->SYSLOG             = 0;
   r->SYSLOG_FACILITY    = LOG_DAEMON;
   r->TCP_KEEPALIVE_TIME = 3600;
@@ -676,6 +678,9 @@ void config_param_validate (char *k, char *v, stud_config *cfg, char *file, int 
   else if (strcmp(k, CFG_QUIET) == 0) {
     r = config_param_val_bool(v, &cfg->QUIET);
   }
+  else if (strcmp(k, CFG_VERBOSE) == 0) {
+    r = config_param_val_bool(v, &cfg->VERBOSE);
+  }
   else if (strcmp(k, CFG_SYSLOG) == 0) {
     r = config_param_val_bool(v, &cfg->SYSLOG);
   }
@@ -1129,6 +1134,12 @@ void config_print_default (FILE *fd, stud_config *cfg) {
   fprintf(fd, FMT_STR, CFG_QUIET, config_disp_bool(cfg->QUIET));
   fprintf(fd, "\n");
 
+  fprintf(fd, "# Verbose execution, increase logging\n");
+  fprintf(fd, "#\n");
+  fprintf(fd, "# type: boolean\n");
+  fprintf(fd, FMT_STR, CFG_VERBOSE, config_disp_bool(cfg->VERBOSE));
+  fprintf(fd, "\n");
+
   fprintf(fd, "# Use syslog for logging\n");
   fprintf(fd, "#\n");
   fprintf(fd, "# type: boolean\n");
@@ -1206,6 +1217,7 @@ void config_parse_cli(int argc, char **argv, stud_config *cfg) {
     { CFG_USER, 1, NULL, 'u' },
     { CFG_GROUP, 1, NULL, 'g' },
     { CFG_QUIET, 0, NULL, 'q' },
+    { CFG_VERBOSE, 0, NULL, 'v' },
     { CFG_SYSLOG, 0, NULL, 's' },
     { CFG_SYSLOG_FACILITY, 1, NULL, CFG_PARAM_SYSLOG_FACILITY },
     { CFG_DAEMON, 0, &cfg->DAEMONIZE, 1 },
@@ -1294,6 +1306,9 @@ void config_parse_cli(int argc, char **argv, stud_config *cfg) {
         break;
       case 'q':
         config_param_validate(CFG_QUIET, CFG_BOOL_ON, cfg, NULL, 0);
+        break;
+      case 'v':
+        config_param_validate(CFG_VERBOSE, CFG_BOOL_ON, cfg, NULL, 0);
         break;
       case 's':
         config_param_validate(CFG_SYSLOG, CFG_BOOL_ON, cfg, NULL, 0);

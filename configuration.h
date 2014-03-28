@@ -65,6 +65,7 @@ struct __stud_config {
     char *SHCUPD_MCASTTTL;
 #endif
     int QUIET;
+    int VERBOSE;
     int SYSLOG;
     int SYSLOG_FACILITY;
     int TCP_KEEPALIVE_TIME;

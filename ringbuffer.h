@@ -48,6 +48,7 @@ typedef struct ringbuffer {
     bufent *head; // reads from the head
     bufent *tail; // writes to the tail
     size_t used;
+    size_t bytes_written;
 } ringbuffer;
 
 void ringbuffer_init(ringbuffer *rb);
@@ -63,5 +64,8 @@ int ringbuffer_size(ringbuffer *rb);
 int ringbuffer_capacity(ringbuffer *rb);
 int ringbuffer_is_empty(ringbuffer *rb);
 int ringbuffer_is_full(ringbuffer *rb);
+
+int ringbuffer_bytes_written(const ringbuffer *rb);
+int ringbuffer_bytes_pending(const ringbuffer *rb);
 
 #endif /* RINGBUFFER_H */
