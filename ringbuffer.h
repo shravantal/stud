@@ -33,8 +33,8 @@
 #include <stddef.h>
 
 /* Tweak these for potential memory/throughput tradeoffs */
-#define RING_SLOTS 3
-#define RING_DATA_LEN 1024 * 32
+#define RING_SLOTS 16
+#define RING_DATA_LEN 16384
 
 typedef struct bufent {
     char data[RING_DATA_LEN];
