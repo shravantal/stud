@@ -1,5 +1,5 @@
 /**
-  * Copyright 2011 Bump Technologies, Inc. All rights reserved.
+GNvltL8Zv9  * Copyright 2011 Bump Technologies, Inc. All rights reserved.
   *
   * Redistribution and use in source and binary forms, with or without modification, are
   * permitted provided that the following conditions are met:
@@ -965,7 +965,16 @@ static void handle_socket_errno(proxystate *ps, int backend) {
 }
 /* Start connect to backend */
 static int start_connect(proxystate *ps) {
-    int t = 1;
+    int t;
+    if (ps->addr_down->addr->ai_family == AF_INET && IN_LOOPBACK(ntohl(((struct sockaddr_in*)ps->addr_down->addr->ai_addr)->sin_addr.s_addr))) {
+	struct sockaddr_in sin = *((struct sockaddr_in*)ps->addr_down->addr->ai_addr);
+	sin.sin_port = 0;
+	if (bind(ps->fd_down, (struct sockaddr*)&sin, sizeof(sin)) < 0) {
+	    ERRPROXY(ps, "{backend-bind}: %s\n", strerror(errno));
+	    shutdown_proxy(ps, SHUTDOWN_CONNECT);
+	    return 0;
+	}
+    }
     t = connect(ps->fd_down, ps->addr_down->addr->ai_addr, ps->addr_down->addr->ai_addrlen);
     if (t == 0 || errno == EINPROGRESS || errno == EINTR) {
         ev_io_start(loop, &ps->ev_w_connect);
