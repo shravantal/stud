@@ -204,7 +204,7 @@ static void VWLOG (int level, const char* fmt, va_list ap)
 
 	localtime_r(&tv.tv_sec, &tm);
 	n = strftime(buf, sizeof(buf), "%Y%m%dT%H%M%S", &tm);
-	sprintf(buf+n, ".%06ld [%5d] %s", tv.tv_usec, getpid(), fmt);
+	sprintf(buf+n, ".%06d [%5d] %s", (int)tv.tv_usec, getpid(), fmt);
 	va_copy(ap1, ap);
 	vfprintf(logf, buf, ap1);
     }
@@ -245,26 +245,39 @@ logproxy (int level, const proxystate* ps, const char* fmt, ...)
     char abuf[INET_ADDRSTRLEN+1];
     int bytes_up = -1;
     int bytes_down = -1;
-    int ssl_len;
-    int clear_len;
-    const char* s;
     va_list ap;
+    char sslbuf[33], clearbuf[33];
+    int i, j;
 
     ioctl(ps->fd_up, FIONWRITE, &bytes_up);
     ioctl(ps->fd_down, FIONWRITE, &bytes_down);
-    if ((s = strchr(ps->buf1_ssl, '\r'))) {
-	ssl_len = s - ps->buf1_ssl;
-    } else {
-	ssl_len = ps->buf1_ssl_len;
+
+    for (i = 0, j = 0; i < ps->buf1_ssl_len && j < (int)sizeof(sslbuf)-2; ++i) {
+	char c = ps->buf1_ssl[i];
+	if (c == '\r') {
+	    break;
+	}
+	sslbuf[j++] = c;
+	if (c == '%') {
+	    sslbuf[j++] = c;
+	}
     }
-    if ((s = strchr(ps->buf1_clear, '\r'))) {
-	clear_len = s - ps->buf1_clear;
-    } else {
-	clear_len = ps->buf1_clear_len;
+    sslbuf[j] = 0;
+
+    for (i = 0, j = 0; i < ps->buf1_clear_len && j < (int)sizeof(clearbuf)-2; ++i) {
+	char c = ps->buf1_clear[i];
+	if (c == '\r') {
+	    break;
+	}
+	clearbuf[j++] = c;
+	if (c == '%') {
+	    clearbuf[j++] = c;
+	}
     }
+    clearbuf[j] = 0;
 
     va_start(ap, fmt);
-    snprintf(buf, sizeof(buf), "%s:%d :%d cfd=%d sfd=%d cbytes=%d/%d/%d sbytes=%d/%d/%d ssl=%s sockerr=%d t=%lu [%.*s] [%.*s]: %s",
+    snprintf(buf, sizeof(buf), "%s:%d :%d cfd=%d sfd=%d cbytes=%d/%d/%d sbytes=%d/%d/%d ssl=%s sockerr=%d t=%llu [%s] [%s]: %s",
 	     inet_ntop(AF_INET, &((struct sockaddr_in*)&ps->remote_ip)->sin_addr, abuf, sizeof(abuf)),
 	     ntohs(((struct sockaddr_in*)&ps->remote_ip)->sin_port),
 	     ps->connect_port,
@@ -277,9 +290,9 @@ logproxy (int level, const proxystate* ps, const char* fmt, ...)
 	     bytes_down,
 	     ps->ssl_info_state,
 	     ps->socket_err,
-	     get_usec() - ps->t_start,
-	     ssl_len, ps->buf1_ssl,
-	     clear_len, ps->buf1_clear,
+	     (unsigned long long)(get_usec() - ps->t_start),
+	     sslbuf,
+	     clearbuf,
 	     fmt);
     VWLOG(level, buf, ap);
 }
@@ -939,6 +952,8 @@ static void shutdown_proxy(proxystate *ps, SHUTDOWN_REQUESTOR req) {
         SSL_set_shutdown(ps->ssl, SSL_SENT_SHUTDOWN);
         SSL_free(ps->ssl);
 
+	ringbuffer_cleanup(&ps->ring_clear2ssl);
+	ringbuffer_cleanup(&ps->ring_ssl2clear);
         free(ps);
     }
     else {
@@ -999,7 +1014,7 @@ static void clear_read(struct ev_loop *loop, ev_io *w, int revents) {
     }
     int fd = w->fd;
     char * buf = ringbuffer_write_ptr(&ps->ring_clear2ssl);
-    t = recv(fd, buf, RING_DATA_LEN, 0);
+    t = recv(fd, buf, ps->ring_clear2ssl.data_len, 0);
 
     if (t > 0) {
 	if (!ps->buf1_clear_len) {
@@ -1156,7 +1171,7 @@ static void end_handshake(proxystate *ps) {
             if(ps->remote_ip.ss_family == AF_INET) {
                struct sockaddr_in* addr = (struct sockaddr_in*)&ps->remote_ip;
                written = snprintf(ring_pnt,
-                                  RING_DATA_LEN,
+        			  ps->ring_ssl2clear.data_len,
                                   tcp_proxy_line,
                                   "TCP4",
                                   inet_ntoa(addr->sin_addr),
@@ -1166,7 +1181,7 @@ static void end_handshake(proxystate *ps) {
                         struct sockaddr_in6* addr = (struct sockaddr_in6*)&ps->remote_ip;
                         inet_ntop(AF_INET6,&(addr->sin6_addr),tcp6_address_string,INET6_ADDRSTRLEN);
                         written = snprintf(ring_pnt,
-                                  RING_DATA_LEN,
+                        	  ps->ring_ssl2clear.data_len,
                                   tcp_proxy_line,
                                   "TCP6",
                                   tcp6_address_string,
@@ -1339,7 +1354,7 @@ static void ssl_read(struct ev_loop *loop, ev_io *w, int revents) {
 	return;
     }
     char * buf = ringbuffer_write_ptr(&ps->ring_ssl2clear);
-    t = SSL_read(ps->ssl, buf, RING_DATA_LEN);
+    t = SSL_read(ps->ssl, buf, ps->ring_ssl2clear.data_len);
 
     /* Fix CVE-2009-3555. Disable reneg if started by client. */
     if (ps->renegotiation) {
@@ -1489,8 +1504,8 @@ static void handle_accept(struct ev_loop *loop, ev_io *w, int revents) {
     ps->renegotiation = 0;
     ps->remote_ip = addr;
     ps->connect_port = 0;
-    ringbuffer_init(&ps->ring_clear2ssl);
-    ringbuffer_init(&ps->ring_ssl2clear);
+    ringbuffer_init(&ps->ring_clear2ssl, CONFIG->RING_SLOTS, CONFIG->RING_DATA_LEN);
+    ringbuffer_init(&ps->ring_ssl2clear, CONFIG->RING_SLOTS, CONFIG->RING_DATA_LEN);
     ps->buf1_ssl[0] = 0;
     ps->buf1_ssl_len = 0;
     ps->buf1_clear[0] = 0;
@@ -1622,8 +1637,8 @@ static void handle_clear_accept(struct ev_loop *loop, ev_io *w, int revents) {
     ps->handshaked = 0;
     ps->renegotiation = 0;
     ps->remote_ip = addr;
-    ringbuffer_init(&ps->ring_clear2ssl);
-    ringbuffer_init(&ps->ring_ssl2clear);
+    ringbuffer_init(&ps->ring_clear2ssl, CONFIG->RING_SLOTS, CONFIG->RING_DATA_LEN);
+    ringbuffer_init(&ps->ring_ssl2clear, CONFIG->RING_SLOTS, CONFIG->RING_DATA_LEN);
 
     /* set up events */
     ev_io_init(&ps->ev_r_clear, clear_read, client, EV_READ);
