@@ -796,8 +796,7 @@ int config_file_parse (char *file, stud_config *cfg) {
   if (cfg == NULL)
     config_die("Undefined stud options; THIS IS A BUG!\n");
   
-  char line[CONFIG_BUF_SIZE];
-  FILE *fd = NULL;
+    FILE *fd = NULL;
 
   // should we read stdin?
   if (file == NULL || strlen(file) < 1 || strcmp(file, "-") == 0) {
@@ -811,8 +810,16 @@ int config_file_parse (char *file, stud_config *cfg) {
   // read config
   int i = 0;
   while (i < CONFIG_MAX_LINES) {
-    memset(line, '\0', sizeof(line));
-    if (fgets(line, (sizeof(line) - 1), fd) == NULL) break;
+      size_t len;
+      char* s;
+      char* line;
+      if ((s = fgetln(fd, &len)) == NULL) {
+	  if (!feof(fd)) {
+	      config_die("Error reading configuration file '%s': %s\n", file, strerror(errno));
+	  }
+	  break;
+      }
+      line = strndup(s, len);
     i++;
     
     // get configuration key
@@ -829,6 +836,7 @@ int config_file_parse (char *file, stud_config *cfg) {
     
     // validate configuration key => value
     config_param_validate(key, val, cfg, file, i);
+    free(line);
   }
 
   fclose(fd);
