@@ -438,8 +438,8 @@ void tlsext_debug_callback(SSL *ssl, int client_server, int type, unsigned char 
     }
 }
 
-/* This callback function is executed before OpenSSL sends the SSL
- * certificate.  Use to send SHA-2 cert to compliant clients
+/* This callback function is executed after all extensions have been processed and
+ * before OpenSSL sends the SSL certificate.  Use to send SHA-2 cert to compliant clients
  */
 
 int servername_callback(SSL *ssl, int *al, void *data) {
