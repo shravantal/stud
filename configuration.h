@@ -53,6 +53,7 @@ struct __stud_config {
     struct stud_config_addr* BACKADDR_DEFAULT;
     long NCORES;
     char *CERT_FILE;
+    char *CERT_FILE_SHA2;
     char *CIPHER_SUITE;
     char *ENGINE;
     int BACKLOG;

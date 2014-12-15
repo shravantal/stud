@@ -89,6 +89,7 @@ static ev_io listener;
 static int listener_socket;
 static int child_num;
 static pid_t *child_pids;
+static SSL_CTX *ssl_ctx_sha2;
 static SSL_CTX *ssl_ctx;
 static SSL_SESSION *client_session;
 
@@ -168,6 +169,7 @@ typedef struct proxystate {
     int handshaked:1;     /* Initial handshake happened */
     int clear_connected:1; /* clear stream is connected  */
     int renegotiation:1;  /* Renegotation is occuring */
+    int want_sha2:1;      /* client wants a sha2 cert */
 
     SSL *ssl;             /* OpenSSL SSL state */
 
@@ -404,6 +406,50 @@ static void info_callback(const SSL *ssl, int where, int ret) {
             LOG("{core} SSL renegotiation asked by client\n");
         }
     }
+}
+
+/* Unfortunately, there is no hook for the singature algorithm callback
+ * and the minimal processing done by the library is encapsulated away
+ * where it can't be found.
+ * So, we duplicate processing. :(
+ * Data is two-bytes length (bytes), then hash, signature pairs
+ * we only care about SHA256_RSA, because that's our non-default
+ */
+
+void tlsext_debug_callback(SSL *ssl, int client_server, int type, unsigned char *data, int len, void *arg) 
+{
+    (void) client_server;
+    (void) arg;
+    if (type == TLSEXT_TYPE_signature_algorithms) {
+        /* require even length data */
+        if (len > 2 && (len & 1) == 0) {
+            int dsize = (data[0] << 8) | data[1];
+            if (dsize == len - 2) {
+                int i;
+                for (i = 2; i < len; i+=2) {
+                    unsigned char hash_alg = data[i], sig_alg = data[i+1];
+                    if (sig_alg == TLSEXT_signature_rsa && hash_alg == TLSEXT_hash_sha256) {
+                        proxystate *ps = (proxystate *)SSL_get_app_data(ssl);
+                        ps->want_sha2 = 1;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/* This callback function is executed before OpenSSL sends the SSL
+ * certificate.  Use to send SHA-2 cert to compliant clients
+ */
+
+int servername_callback(SSL *ssl, int *al, void *data) {
+    (void) data;
+    (void) al;
+    proxystate *ps = (proxystate *)SSL_get_app_data(ssl);
+    if (ps->want_sha2) {
+        SSL_set_SSL_CTX(ssl, ssl_ctx_sha2);
+    }
+    return 1;
 }
 
 #ifdef USE_SHARED_CACHE
@@ -683,11 +729,12 @@ RSA *load_rsa_privatekey(SSL_CTX *ctx, const char *file) {
 /* Init library and load specified certificate.
  * Establishes a SSL_ctx, to act as a template for
  * each connection */
-SSL_CTX * init_openssl() {
+SSL_CTX * init_openssl(int sha2) {
     SSL_library_init();
     SSL_load_error_strings();
     SSL_CTX *ctx = NULL;
     RSA *rsa;
+    char *cert_file;
 
     long ssloptions = SSL_OP_NO_SSLv2 | SSL_OP_ALL | 
             SSL_OP_NO_SESSION_RESUMPTION_ON_RENEGOTIATION;
@@ -705,6 +752,7 @@ SSL_CTX * init_openssl() {
 
     SSL_CTX_set_options(ctx, ssloptions);
     SSL_CTX_set_info_callback(ctx, info_callback);
+    SSL_CTX_set_tlsext_servername_callback(ctx, servername_callback);
 
     if (CONFIG->ENGINE) {
         ENGINE *e = NULL;
@@ -736,12 +784,17 @@ SSL_CTX * init_openssl() {
         return ctx;
 
     /* SSL_SERVER Mode stuff */
-    if (SSL_CTX_use_certificate_chain_file(ctx, CONFIG->CERT_FILE) <= 0) {
+    cert_file = CONFIG->CERT_FILE;
+    if (sha2) {
+        cert_file = CONFIG->CERT_FILE_SHA2;
+    }
+
+    if (SSL_CTX_use_certificate_chain_file(ctx, cert_file) <= 0) {
         ERR_print_errors_fp(stderr);
         exit(1);
     }
 
-    rsa = load_rsa_privatekey(ctx, CONFIG->CERT_FILE);
+    rsa = load_rsa_privatekey(ctx, cert_file);
     if(!rsa) {
        ERR("Error loading rsa private key\n");
        exit(1);
@@ -753,7 +806,7 @@ SSL_CTX * init_openssl() {
     }
 
 #ifndef OPENSSL_NO_DH
-    init_dh(ctx, CONFIG->CERT_FILE);
+    init_dh(ctx, cert_file);
 #endif /* OPENSSL_NO_DH */
 
 #ifdef USE_SHARED_CACHE
@@ -1490,6 +1543,7 @@ static void handle_accept(struct ev_loop *loop, ev_io *w, int revents) {
     SSL_set_mode(ssl, mode);
     SSL_set_accept_state(ssl);
     SSL_set_fd(ssl, client);
+    SSL_set_tlsext_debug_callback(ssl, tlsext_debug_callback);
 
     proxystate *ps = (proxystate *)malloc(sizeof(proxystate));
 
@@ -1502,6 +1556,7 @@ static void handle_accept(struct ev_loop *loop, ev_io *w, int revents) {
     ps->clear_connected = 0;
     ps->handshaked = 0;
     ps->renegotiation = 0;
+    ps->want_sha2 = 0;
     ps->remote_ip = addr;
     ps->connect_port = 0;
     ringbuffer_init(&ps->ring_clear2ssl, CONFIG->RING_SLOTS, CONFIG->RING_DATA_LEN);
@@ -1996,7 +2051,12 @@ int main(int argc, char **argv) {
 #endif /* USE_SHARED_CACHE */
 
     /* load certificate, pass to handle_connections */
-    ssl_ctx = init_openssl();
+    ssl_ctx = init_openssl(0);
+    if (CONFIG->CERT_FILE_SHA2) {
+        ssl_ctx_sha2 = init_openssl(1);
+    } else {
+        ssl_ctx_sha2 = ssl_ctx;
+    }
 
     if (CONFIG->CHROOT && CONFIG->CHROOT[0])
         change_root();

@@ -49,6 +49,7 @@
 #define CFG_WRITE_IP "write-ip"
 #define CFG_WRITE_PROXY "write-proxy"
 #define CFG_PEM_FILE "pem-file"
+#define CFG_PEM_FILE_SHA2 "pem-file-sha2"
 #define CFG_BACKEND_CONNECT_TIMEOUT "backend-connect-timeout"
 #define CFG_SSL_HANDSHAKE_TIMEOUT "ssl-handshake-timeout"
 #define CFG_RECV_BUFSIZE "recv-bufsize"
@@ -136,6 +137,7 @@ stud_config * config_new (void) {
   config_param_val_addr(strdup("127.0.0.1"), strdup("8000"), &r->BACKADDR_DEFAULT);
   r->NCORES             = 1;
   r->CERT_FILE          = NULL;
+  r->CERT_FILE_SHA2     = NULL;
   r->CIPHER_SUITE       = NULL;
   r->ENGINE             = NULL;
   r->BACKLOG            = 100;
@@ -191,6 +193,7 @@ void config_destroy (stud_config *cfg) {
       free(a);
   }
   if (cfg->CERT_FILE != NULL) free(cfg->CERT_FILE);
+  if (cfg->CERT_FILE_SHA2 != NULL) free(cfg->CERT_FILE_SHA2);
   if (cfg->CIPHER_SUITE != NULL) free(cfg->CIPHER_SUITE);
   if (cfg->ENGINE != NULL) free(cfg->ENGINE);
 
@@ -752,6 +755,19 @@ void config_param_validate (char *k, char *v, stud_config *cfg, char *file, int 
         config_assign_str(&cfg->CERT_FILE, v);
     }
   }
+  else if (strcmp(k, CFG_PEM_FILE_SHA2) == 0) {
+    if (v != NULL && strlen(v) > 0) {
+      if (stat(v, &st) != 0) {
+        config_error_set("Unable to stat x509 certificate (sha1) PEM file '%s': ", v, strerror(errno));
+        r = 0;
+      }
+      else if (! S_ISREG(st.st_mode)) {
+        config_error_set("Invalid x509 certificate (sha1) PEM file '%s': Not a file.", v);
+        r = 0;
+      } else
+        config_assign_str(&cfg->CERT_FILE_SHA2, v);
+    }
+  }
   else if (strcmp(k, CFG_BACKEND_CONNECT_TIMEOUT) == 0) {
       r = config_param_val_int_pos(v, &cfg->BACKEND_CONNECT_TIMEOUT);
   }
@@ -1042,6 +1058,12 @@ void config_print_default (FILE *fd, stud_config *cfg) {
   fprintf(fd, "#\n");
   fprintf(fd, "# type: string\n");
   fprintf(fd, FMT_QSTR, CFG_PEM_FILE, config_disp_str(cfg->CERT_FILE));
+  fprintf(fd, "\n");
+
+  fprintf(fd, "# SSL x509 certificate (sha1) file.\n");
+  fprintf(fd, "#\n");
+  fprintf(fd, "# type: string\n");
+  fprintf(fd, FMT_QSTR, CFG_PEM_FILE_SHA2, config_disp_str(cfg->CERT_FILE_SHA2));
   fprintf(fd, "\n");
   
   fprintf(fd, "# SSL protocol.\n");
