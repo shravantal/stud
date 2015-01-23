@@ -449,7 +449,7 @@ int servername_callback(SSL *ssl, int *al, void *data) {
     if (ps->want_sha2) {
         SSL_set_SSL_CTX(ssl, ssl_ctx_sha2);
     }
-    return 1;
+    return SSL_TLSEXT_ERR_NOACK; // NOACK because we didn't actually use the servername info
 }
 
 #ifdef USE_SHARED_CACHE
