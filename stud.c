@@ -449,7 +449,7 @@ int servername_callback(SSL *ssl, int *al, void *data) {
     if (ps->want_sha2) {
         SSL_set_SSL_CTX(ssl, ssl_ctx_sha2);
     }
-    return 1;
+    return SSL_TLSEXT_ERR_NOACK; // NOACK because we didn't actually use the servername info
 }
 
 #ifdef USE_SHARED_CACHE
@@ -739,12 +739,11 @@ SSL_CTX * init_openssl(int sha2) {
     long ssloptions = SSL_OP_NO_SSLv2 | SSL_OP_ALL | 
             SSL_OP_NO_SESSION_RESUMPTION_ON_RENEGOTIATION;
 
-    if (CONFIG->ETYPE == ENC_TLS)
-        ctx = SSL_CTX_new((CONFIG->PMODE == SSL_CLIENT) ? TLSv1_client_method() : TLSv1_server_method());
-    else if (CONFIG->ETYPE == ENC_SSL)
-        ctx = SSL_CTX_new((CONFIG->PMODE == SSL_CLIENT) ? SSLv23_client_method() : SSLv23_server_method());
-    else
-        assert(CONFIG->ETYPE == ENC_TLS || CONFIG->ETYPE == ENC_SSL);
+    if (CONFIG->ETYPE == ENC_TLS) {
+        ssloptions |= SSL_OP_NO_SSLv3;
+    }
+
+    ctx = SSL_CTX_new((CONFIG->PMODE == SSL_CLIENT) ? SSLv23_client_method() : SSLv23_server_method());
 
 #ifdef SSL_OP_NO_COMPRESSION
     ssloptions |= SSL_OP_NO_COMPRESSION;
