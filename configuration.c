@@ -20,6 +20,8 @@
 #include <syslog.h>
 #include <sys/socket.h>
 #include <netdb.h>
+#include <ifaddrs.h>
+#include <netinet/in.h>
 
 #include "configuration.h"
 #include "version.h"
@@ -57,6 +59,11 @@
 #define CFG_LOG_FILENAME "log-filename"
 #define CFG_RING_SLOTS "ring-slots"
 #define CFG_RING_DATA_LEN "ring-data-len"
+#define CFG_BACKEND_CONNECT "backend-connect"
+#define CFG_REQUIRE_PEER_CERT "require-peer-certificate"
+#define CFG_PINNED_CERT_FILE "pinned-certificate-file"
+#define CFG_CA_FILE "ca-file"
+#define CFG_CLIENT_MODE "client-mode"
 
 #ifdef USE_SHARED_CACHE
   #define CFG_SHARED_CACHE "shared-cache"
@@ -130,8 +137,7 @@ stud_config * config_new (void) {
   r->CHROOT             = NULL;
   r->UID                = -1;
   r->GID                = -1;
-  r->FRONT_IP           = NULL;
-  r->FRONT_PORT         = strdup("8443");
+  config_param_val_addr(NULL, strdup("8443"), &r->FRONTADDR);
   r->BACKADDR		= NULL;
   r->BACKADDR_DEFAULT	= NULL;
   config_param_val_addr(strdup("127.0.0.1"), strdup("8000"), &r->BACKADDR_DEFAULT);
@@ -173,6 +179,10 @@ stud_config * config_new (void) {
   r->RING_SLOTS = 0;
   r->RING_DATA_LEN = 0;
 
+  r->REQUIRE_PEER_CERT = 0;
+  r->PINNED_CERT = NULL;
+  r->CA_FILE = NULL;
+
   return r;
 }
 
@@ -182,8 +192,13 @@ void config_destroy (stud_config *cfg) {
 
   // free all members!
   if (cfg->CHROOT != NULL) free(cfg->CHROOT);
-  if (cfg->FRONT_IP != NULL) free(cfg->FRONT_IP);
-  if (cfg->FRONT_PORT != NULL) free(cfg->FRONT_PORT);
+  if (cfg->FRONTADDR != NULL) {
+      struct stud_config_addr* a = cfg->FRONTADDR;
+      free(a->IP);
+      free(a->PORT);
+      free(a->addr);
+      free(a);
+  }
   while (cfg->BACKADDR != NULL) {
       struct stud_config_addr* a = cfg->BACKADDR;
       cfg->BACKADDR = cfg->BACKADDR->next;
@@ -398,7 +413,7 @@ int config_param_host_port_wildcard (char *str, char **addr, char **port, int wi
   // write
   if (strcmp(addr_buf, "*") == 0) {
     if (wildcard_okay)
-      free(*addr);
+      *addr = NULL;
     else {
       config_error_set("Invalid address: wildcards are not allowed.");
       return 0;
@@ -407,7 +422,6 @@ int config_param_host_port_wildcard (char *str, char **addr, char **port, int wi
     //if (*addr != NULL) free(*addr);
     *addr = strdup(addr_buf);
   }
-  // if (**port != NULL) free(*port);
   *port = strdup(port_buf);
   
   // printf("ADDR FINAL: '%s', '%s'\n", *addr, *port);
@@ -462,6 +476,20 @@ int config_param_val_addr (char* ip, char* port, struct stud_config_addr** cfg)
     /* backaddr */
     struct addrinfo hints;
     struct addrinfo* addr;
+    int bits = 0;
+
+    {
+	char *x = ip ? strchr(ip, '/') : NULL;
+	if (x) {
+	    *x = 0;
+	    bits = atoi(x+1);
+	    if (bits < 1 || bits > 127) {
+		config_error_set("Invalid address prefix bits: '%s'", x+1);
+		return 0;
+	    }
+	}
+    }
+
     memset(&hints, 0, sizeof hints);
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
@@ -475,10 +503,57 @@ int config_param_val_addr (char* ip, char* port, struct stud_config_addr** cfg)
 	ipp->addr = addr;
 	ipp->IP = ip;
 	ipp->PORT = port;
+	ipp->prefix_bits = bits;
 	ipp->next = *cfg;
 	*cfg = ipp;
     }
     return 1;
+}
+
+int config_same_subnet (const struct sockaddr* s1, const struct sockaddr* s2, int prefix_bits)
+{
+    int r = 0;
+    if (s1->sa_family == s2->sa_family) {
+	if (s1->sa_family == AF_INET) {
+	    in_addr_t a = ((const struct sockaddr_in*)s1)->sin_addr.s_addr;
+	    in_addr_t b = ((const struct sockaddr_in*)s2)->sin_addr.s_addr;
+	    in_addr_t netmask = 0xffffffff << (32 - prefix_bits);
+	    netmask = htonl(netmask);
+	    r = (a & netmask) == (b & netmask);
+	} else if (s1->sa_family == AF_INET6) {
+	    // XXX need work
+	}
+    }
+    return r;
+}
+
+int config_param_bind_addr (struct stud_config_addr* cfg)
+{
+    int r = 1;
+    if (cfg->prefix_bits) {
+	struct ifaddrs* ifa;
+	struct ifaddrs* i;
+	if (getifaddrs(&ifa) < 0) {
+	    config_error_set("Unable to get local interfaces: %s", strerror(errno));
+	    return 0;
+	}
+	for (i = ifa; i; i = i->ifa_next) {
+	    if (config_same_subnet(i->ifa_addr, cfg->addr->ai_addr, cfg->prefix_bits)) {
+		if (i->ifa_addr->sa_family == AF_INET) {
+		    ((struct sockaddr_in*)cfg->addr->ai_addr)->sin_addr = ((struct sockaddr_in*)i->ifa_addr)->sin_addr;
+		} else if (i->ifa_addr->sa_family == AF_INET6) {
+		    // XXX need work
+		}
+		break;
+	    }
+	}
+	if (!i) {
+	    config_error_set("No matching local interface: %s/%d", cfg->IP, cfg->prefix_bits);
+	    r = 0;
+	}
+	freeifaddrs(ifa);
+    }
+    return r;
 }
 
 #ifdef USE_SHARED_CACHE
@@ -606,7 +681,14 @@ void config_param_validate (char *k, char *v, stud_config *cfg, char *file, int 
     r = config_param_val_bool(v, &cfg->PREFER_SERVER_CIPHERS);
   }
   else if (strcmp(k, CFG_FRONTEND) == 0) {
-    r = config_param_host_port_wildcard(v, &cfg->FRONT_IP, &cfg->FRONT_PORT, 1);
+    char* ip;
+    char* port;
+    if (!config_param_host_port_wildcard(v, &ip, &port, 1)
+	|| !config_param_val_addr(ip, port, &cfg->FRONTADDR)
+	|| !config_param_bind_addr(cfg->FRONTADDR))
+    {
+	r = 0;
+    }
   }
   else if (strcmp(k, CFG_BACKEND) == 0) {
     char* ip;
@@ -791,6 +873,68 @@ void config_param_validate (char *k, char *v, stud_config *cfg, char *file, int 
   else if (strcmp(k, CFG_RING_DATA_LEN) == 0) {
       r = config_param_val_int_pos(v, &cfg->RING_DATA_LEN);
   }
+  else if (strcmp(k, CFG_BACKEND_CONNECT) == 0) {
+      r = config_param_val_bool(v, &cfg->BACKEND_CONNECT);
+  }
+  else if (strcmp(k, CFG_REQUIRE_PEER_CERT) == 0) {
+      r = config_param_val_bool(v, &cfg->REQUIRE_PEER_CERT);
+  }
+  else if (strcmp(k, CFG_PINNED_CERT_FILE) == 0) {
+      if (v != NULL && strlen(v) > 0) {
+        if (stat(v, &st) != 0) {
+          config_error_set("Unable to stat pinned x509 certificate PEM file '%s': ", v, strerror(errno));
+          r = 0;
+        }
+        else if (! S_ISREG(st.st_mode)) {
+          config_error_set("Invalid pinned x509 certificate PEM file '%s': Not a file.", v);
+          r = 0;
+        } else {
+          BIO *bio;
+
+	  if ((bio = BIO_new_file(v, "r")) == NULL) {
+	    config_error_set("Unable to open pinned x509 certificate PEM file '%s': ", v, strerror(errno));
+	    r = 0;
+	  } else {
+	    X509* cert;
+
+	    if ((cert = PEM_read_bio_X509(bio, NULL, 0, NULL)) == NULL) {
+  	      config_error_set("Unable to read pinned x509 certificate PEM file '%s'", v);
+	      r = 0;
+	    } else {
+	      unsigned char md[EVP_MAX_MD_SIZE];
+	      unsigned int mdlen;
+
+	      mdlen = sizeof(md);
+	      memset(md, 0xfe, sizeof(md));
+	      X509_digest(cert, EVP_sha1(), md, &mdlen);
+	      X509_free(cert);
+	      cfg->PINNED_CERT = (unsigned char*)malloc(mdlen);
+	      memcpy(cfg->PINNED_CERT, md, mdlen);
+	    }
+	    BIO_free(bio);
+	  }
+        }
+      }
+  }
+  else if (strcmp(k, CFG_CA_FILE) == 0) {
+      if (v != NULL && strlen(v) > 0) {
+        if (stat(v, &st) != 0) {
+          config_error_set("Unable to stat CA x509 certificate PEM file '%s': ", v, strerror(errno));
+          r = 0;
+        }
+        else if (! S_ISREG(st.st_mode)) {
+          config_error_set("Invalid x509 CA certificate PEM file '%s': Not a file.", v);
+          r = 0;
+        } else
+          config_assign_str(&cfg->CA_FILE, v);
+      }
+  }
+  else if (strcmp(k, CFG_CLIENT_MODE) == 0) {
+      int val;
+      if ((r = config_param_val_bool(v, &val))) {
+	  cfg->PMODE = val ? SSL_CLIENT : SSL_SERVER;
+      }
+  }
   else {
     fprintf(
       stderr,
@@ -971,7 +1115,7 @@ void config_print_usage_fd (char *prog, stud_config *cfg, FILE *out) {
   fprintf(out, "  --client                    Enable client proxy mode\n");
   fprintf(out, "  -b  --backend=HOST,PORT     Backend [connect] (default is \"%s\")\n", config_disp_hostport(cfg->BACKADDR_DEFAULT->IP,
 													     cfg->BACKADDR_DEFAULT->PORT));
-  fprintf(out, "  -f  --frontend=HOST,PORT    Frontend [bind] (default is \"%s\")\n", config_disp_hostport(cfg->FRONT_IP, cfg->FRONT_PORT));
+  fprintf(out, "  -f  --frontend=HOST,PORT    Frontend [bind] (default is \"%s\")\n", config_disp_hostport(cfg->FRONTADDR->IP, cfg->FRONTADDR->PORT));
 
 #ifdef USE_SHARED_CACHE
   fprintf(out, "\n");
@@ -1039,7 +1183,7 @@ void config_print_default (FILE *fd, stud_config *cfg) {
   fprintf(fd, "#\n");
   fprintf(fd, "# type: string\n");
   fprintf(fd, "# syntax: [HOST]:PORT\n");
-  fprintf(fd, FMT_QSTR, CFG_FRONTEND, config_disp_hostport(cfg->FRONT_IP, cfg->FRONT_PORT));
+  fprintf(fd, FMT_QSTR, CFG_FRONTEND, config_disp_hostport(cfg->FRONTADDR->IP, cfg->FRONTADDR->PORT));
   fprintf(fd, "\n");
 
   fprintf(fd, "# Downstream server address. REQUIRED.\n");

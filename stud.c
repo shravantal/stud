@@ -177,6 +177,14 @@ typedef struct proxystate {
     int connect_port;	/* local port for connection */
 } proxystate;
 
+static void handle_connect(struct ev_loop *loop, ev_io *w, int revents);
+static void connect_timeout(EV_P_ ev_timer *w, int revents);
+static void start_handshake(proxystate *ps, int err);
+static void client_handshake(struct ev_loop *loop, ev_io *w, int revents);
+static void handshake_timeout(EV_P_ ev_timer *w, int revents);
+static void ssl_write(struct ev_loop *loop, ev_io *w, int revents);
+static void ssl_read(struct ev_loop *loop, ev_io *w, int revents);
+
 static void VWLOG (int level, const char* fmt, va_list ap)
 {
     if (logf) {
@@ -753,6 +761,10 @@ SSL_CTX * init_openssl(int sha2) {
     SSL_CTX_set_info_callback(ctx, info_callback);
     SSL_CTX_set_tlsext_servername_callback(ctx, servername_callback);
 
+    if (CONFIG->CA_FILE) {
+	SSL_CTX_load_verify_locations(ctx, CONFIG->CA_FILE, NULL);
+    }
+
     if (CONFIG->ENGINE) {
         ENGINE *e = NULL;
         ENGINE_load_builtin_engines();
@@ -778,10 +790,6 @@ SSL_CTX * init_openssl(int sha2) {
     if (CONFIG->PREFER_SERVER_CIPHERS)
         SSL_CTX_set_options(ctx, SSL_OP_CIPHER_SERVER_PREFERENCE);
 
-
-    if (CONFIG->PMODE == SSL_CLIENT)
-        return ctx;
-
     /* SSL_SERVER Mode stuff */
     cert_file = CONFIG->CERT_FILE;
     if (sha2) {
@@ -802,6 +810,13 @@ SSL_CTX * init_openssl(int sha2) {
     if (SSL_CTX_use_RSAPrivateKey(ctx,rsa) <= 0) {
         ERR_print_errors_fp(stderr);
         exit(1);
+    }
+
+    if (CONFIG->PMODE == SSL_CLIENT)
+        return ctx;
+
+    if (CONFIG->REQUIRE_CLIENT_CERT) {
+	SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, NULL);
     }
 
 #ifndef OPENSSL_NO_DH
@@ -865,17 +880,7 @@ static void prepare_proxy_line(struct sockaddr* ai_addr) {
 
 /* Create the bound socket in the parent process */
 static int create_main_socket() {
-    struct addrinfo *ai, hints;
-    memset(&hints, 0, sizeof hints);
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_flags = AI_PASSIVE | AI_ADDRCONFIG;
-    const int gai_err = getaddrinfo(CONFIG->FRONT_IP, CONFIG->FRONT_PORT,
-                                    &hints, &ai);
-    if (gai_err != 0) {
-        ERR("{getaddrinfo}: [%s]\n", gai_strerror(gai_err));
-        exit(1);
-    }
+    struct addrinfo *ai = CONFIG->FRONTADDR->addr;
 
     int s = socket(ai->ai_family, SOCK_STREAM, IPPROTO_TCP);
     
@@ -1053,6 +1058,97 @@ static int start_connect(proxystate *ps) {
     return 0;
 }
 
+static struct stud_config_addr*
+parse_backend_host (proxystate* ps, char* ip)
+{
+    struct addrinfo hints;
+    struct addrinfo* addr;
+    struct stud_config_addr* ipp;
+    struct stud_config_addr* a;
+
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = AI_NUMERICHOST;
+    const int gai_err = getaddrinfo(ip, NULL, &hints, &addr);
+    if (gai_err != 0) {
+	ERRPROXY(ps, "Unable to parse connect address '%s': %s\n", ip, gai_strerror(gai_err));
+	return NULL;
+    }
+
+    if (addr->ai_family == AF_INET6) {
+	ERRPROXY(ps, "stud needs a fix for ipv6 backend connect addresses: '%s'\n", ip);
+	return NULL;
+    }
+    if (addr->ai_family != AF_INET) {
+	ERRPROXY(ps, "Unsupported address family for backend connect: '%s'\n", ip);
+	return NULL;
+    }
+
+    a = CONFIG->BACKADDR;
+    if (!a) {
+	a = CONFIG->BACKADDR_DEFAULT;
+    }
+
+    for (; a; a = a->next) {
+	if (config_same_subnet(a->addr, addr->ai_addr)) {
+	    break;
+	}
+    }
+    if (!a) {
+	ERRPROXY(ps, "No backend address match for connect: '%s'\n", ip);
+	return NULL;
+    }
+    ((struct sockaddr_in*)addr->ai_addr)->sin_port = ((struct sockaddr_in*)a->addr->ai_addr)->sin_port;
+
+    ipp = (struct stud_config_addr*)malloc(sizeof(*ipp));
+    ipp->addr = addr;
+    ipp->IP = ip;
+    ipp->PORT = a->PORT;
+    ipp->next = NULL;
+    return ipp;
+}
+
+static void ssl_client_setup (proxystate *ps, struct stud_config_addr* backaddr)
+{
+    int back = create_back_socket(backaddr);
+
+    if (back == -1) {
+        ERR("{backend-socket}: %s\n", strerror(errno));
+        shutdown_proxy(ps, SHUTDOWN_CONNECT);
+        return;
+    }
+
+    SSL *ssl = ps->ssl;
+    long mode = SSL_MODE_ENABLE_PARTIAL_WRITE;
+#ifdef SSL_MODE_RELEASE_BUFFERS
+    mode |= SSL_MODE_RELEASE_BUFFERS;
+#endif
+    SSL_set_mode(ssl, mode);
+    SSL_set_connect_state(ssl);
+    SSL_set_fd(ssl, back);
+    if (client_session)
+        SSL_set_session(ssl, client_session);
+
+    ps->fd_down = back;
+    ps->addr_down = backaddr;
+
+    ev_io_init(&ps->ev_w_connect, handle_connect, back, EV_WRITE);
+    ev_timer_init(&ps->ev_t_connect, connect_timeout, CONFIG->BACKEND_CONNECT_TIMEOUT, 0.);
+
+    ev_io_init(&ps->ev_r_handshake, client_handshake, back, EV_READ);
+    ev_io_init(&ps->ev_w_handshake, client_handshake, back, EV_WRITE);
+    ev_timer_init(&ps->ev_t_handshake, handshake_timeout, CONFIG->SSL_HANDSHAKE_TIMEOUT, 0.);
+
+    ev_io_init(&ps->ev_w_ssl, ssl_write, back, EV_WRITE);
+    ev_io_init(&ps->ev_r_ssl, ssl_read, back, EV_READ);
+
+    /* Link back proxystate to SSL state */
+    SSL_set_app_data(ssl, ps);
+
+    start_connect(ps); /* start connect */
+}
+
 /* Read some data from the backend when libev says data is available--
  * write it into the upstream buffer and make sure the write event is
  * enabled for the upstream socket */
@@ -1067,6 +1163,34 @@ static void clear_read(struct ev_loop *loop, ev_io *w, int revents) {
     int fd = w->fd;
     char * buf = ringbuffer_write_ptr(&ps->ring_clear2ssl);
     t = recv(fd, buf, ps->ring_clear2ssl.data_len, 0);
+
+    if (CONFIG->BACKEND_CONNECT && !ps->addr_down) {
+	char *p, *s, *op, *host;
+	struct stud_config_addr* backaddr;
+
+	s = (char*)memchr(buf, '\r', t);
+	if (s) {
+	    s[0] = 0;
+	}
+	if (s && s-buf < t-1 && s[1] == '\n'
+	    && (op = strtok_r(buf, " ", &p)) != NULL
+	    && !strcmp(op, "CONNECT")
+	    && (host = strtok_r(NULL, " ", &p)) != NULL
+	    && strtok_r(NULL, " ", &p) == NULL
+	    && (backaddr = parse_backend_host(ps, host)) != NULL)
+	{
+	    ssl_client_setup(ps, backaddr);
+	    t -= s-buf+2;
+	    if (!t) {
+		return;
+	    }
+	    memcpy(buf, s+2, t);
+	} else {
+	    ERRPROXY(ps, "bad backend connect string");
+	    shutdown_proxy(ps, SHUTDOWN_CONNECT);
+	    return;
+	}
+    }
 
     if (t > 0) {
 	if (!ps->buf1_clear_len) {
@@ -1125,8 +1249,6 @@ static void clear_write(struct ev_loop *loop, ev_io *w, int revents) {
         handle_socket_errno(ps, fd == ps->fd_down ? 1 : 0);
     }
 }
-
-static void start_handshake(proxystate *ps, int err);
 
 /* Continue/complete the asynchronous connect() before starting data transmission
  * between front/backend */
@@ -1207,6 +1329,32 @@ static void end_handshake(proxystate *ps) {
     ev_io_stop(loop, &ps->ev_w_handshake);
     ev_timer_stop(loop, &ps->ev_t_handshake);
 
+    {
+	int cert_error = 0;
+	X509* peer_cert = SSL_get_peer_certificate(ps->ssl);
+
+	if (peer_cert == NULL && CONFIG->REQUIRE_PEER_CERT) {
+	    ERRPROXY(ps, "no peer certificate provided\n");
+	    cert_error = 1;
+	}
+	if (CONFIG->PINNED_CERT) {
+	    unsigned char md[EVP_MAX_MD_SIZE];
+	    unsigned int mdlen;
+
+	    mdlen = sizeof(md);
+	    X509_digest(peer_cert, EVP_sha1(), md, &mdlen);
+	    if (memcmp(md, CONFIG->PINNED_CERT, mdlen)) {
+		ERRPROXY(ps, "pinned certificate mismatch\n");
+		cert_error = 1;
+	    }
+	    LOGPROXY(ps, "pinned peer certificate verified\n");
+	}
+	X509_free(peer_cert);
+	if (cert_error) {
+	    shutdown_proxy(ps, SHUTDOWN_SSLERR);
+	    return;
+	}
+    }
     VERBOSEPROXY(ps,"ssl end handshake\n");
     /* Disable renegotiation (CVE-2009-3555) */
     if (ps->ssl->s3) {
@@ -1658,33 +1806,16 @@ static void handle_clear_accept(struct ev_loop *loop, ev_io *w, int revents) {
     setnonblocking(client);
     settcpkeepalive(client);
 
-    struct stud_config_addr* backaddr = get_backaddr();
-    int back = create_back_socket(backaddr);
-
-    if (back == -1) {
-        close(client);
-        ERR("{backend-socket}: %s\n", strerror(errno));
-        return;
-    }
-
     SSL_CTX * ctx = (SSL_CTX *)w->data;
     SSL *ssl = SSL_new(ctx);
-    long mode = SSL_MODE_ENABLE_PARTIAL_WRITE;
-#ifdef SSL_MODE_RELEASE_BUFFERS
-    mode |= SSL_MODE_RELEASE_BUFFERS;
-#endif
-    SSL_set_mode(ssl, mode);
-    SSL_set_connect_state(ssl);
-    SSL_set_fd(ssl, back);
-    if (client_session)
-        SSL_set_session(ssl, client_session);
 
     proxystate *ps = (proxystate *)malloc(sizeof(proxystate));
+    memset(ps, 0, sizeof(proxystate));
 
     ps->t_start = now;
     ps->fd_up = client;
-    ps->fd_down = back;
-    ps->addr_down = backaddr;
+    ps->fd_down = -1;
+    ps->addr_down = NULL;
     ps->ssl = ssl;
     ps->want_shutdown = 0;
     ps->clear_connected = 1;
@@ -1698,16 +1829,6 @@ static void handle_clear_accept(struct ev_loop *loop, ev_io *w, int revents) {
     ev_io_init(&ps->ev_r_clear, clear_read, client, EV_READ);
     ev_io_init(&ps->ev_w_clear, clear_write, client, EV_WRITE);
 
-    ev_io_init(&ps->ev_w_connect, handle_connect, back, EV_WRITE);
-    ev_timer_init(&ps->ev_t_connect, connect_timeout, CONFIG->BACKEND_CONNECT_TIMEOUT, 0.);
-
-    ev_io_init(&ps->ev_r_handshake, client_handshake, back, EV_READ);
-    ev_io_init(&ps->ev_w_handshake, client_handshake, back, EV_WRITE);
-    ev_timer_init(&ps->ev_t_handshake, handshake_timeout, CONFIG->SSL_HANDSHAKE_TIMEOUT, 0.);
-
-    ev_io_init(&ps->ev_w_ssl, ssl_write, back, EV_WRITE);
-    ev_io_init(&ps->ev_r_ssl, ssl_read, back, EV_READ);
-
     ps->ev_r_ssl.data = ps;
     ps->ev_w_ssl.data = ps;
     ps->ev_r_clear.data = ps;
@@ -1717,11 +1838,10 @@ static void handle_clear_accept(struct ev_loop *loop, ev_io *w, int revents) {
     ps->ev_w_handshake.data = ps;
     ps->ev_t_handshake.data = ps;
 
-    /* Link back proxystate to SSL state */
-    SSL_set_app_data(ssl, ps);
-
     ev_io_start(loop, &ps->ev_r_clear);
-    start_connect(ps); /* start connect */
+    if (!CONFIG->BACKEND_CONNECT) {
+        ssl_client_setup(ps, get_backaddr());
+    }
 }
 
 /* Set up the child (worker) process including libev event loop, read event

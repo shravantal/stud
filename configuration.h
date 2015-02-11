@@ -36,6 +36,7 @@ struct stud_config_addr {
     char* IP;
     char* PORT;
     struct addrinfo *addr;
+    int prefix_bits;
 };
 
 /* configuration structure */
@@ -47,8 +48,7 @@ struct __stud_config {
     char *CHROOT;
     int UID;
     int GID;
-    char *FRONT_IP;
-    char *FRONT_PORT;
+    struct stud_config_addr* FRONTADDR;
     struct stud_config_addr* BACKADDR;
     struct stud_config_addr* BACKADDR_DEFAULT;
     long NCORES;
@@ -79,6 +79,10 @@ struct __stud_config {
     char* LOG_FILENAME;
     int RING_SLOTS;
     int RING_DATA_LEN;
+    int BACKEND_CONNECT;
+    int REQUIRE_PEER_CERT;
+    unsigned char* PINNED_CERT;
+    char *CA_FILE;
 };
 
 typedef struct __stud_config stud_config;
@@ -88,3 +92,4 @@ stud_config * config_new (void);
 void config_destroy (stud_config *cfg);
 int config_file_parse (char *file, stud_config *cfg);
 void config_parse_cli(int argc, char **argv, stud_config *cfg);
+int config_same_subnet (const struct sockaddr* s1, const struct sockaddr* s2, int prefix_bits);
