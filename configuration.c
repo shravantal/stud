@@ -180,7 +180,7 @@ stud_config * config_new (void) {
   r->RING_DATA_LEN = 0;
 
   r->REQUIRE_PEER_CERT = 0;
-  r->PINNED_CERT = NULL;
+  r->PINNED_CERT_DIGEST = NULL;
   r->CA_FILE = NULL;
 
   return r;
@@ -684,8 +684,7 @@ void config_param_validate (char *k, char *v, stud_config *cfg, char *file, int 
     char* ip;
     char* port;
     if (!config_param_host_port_wildcard(v, &ip, &port, 1)
-	|| !config_param_val_addr(ip, port, &cfg->FRONTADDR)
-	|| !config_param_bind_addr(cfg->FRONTADDR))
+	|| !config_param_val_addr(ip, port, &cfg->FRONTADDR))
     {
 	r = 0;
     }
@@ -908,8 +907,9 @@ void config_param_validate (char *k, char *v, stud_config *cfg, char *file, int 
 	      memset(md, 0xfe, sizeof(md));
 	      X509_digest(cert, EVP_sha1(), md, &mdlen);
 	      X509_free(cert);
-	      cfg->PINNED_CERT = (unsigned char*)malloc(mdlen);
-	      memcpy(cfg->PINNED_CERT, md, mdlen);
+	      cfg->PINNED_CERT_DIGEST = (unsigned char*)malloc(mdlen);
+	      memcpy(cfg->PINNED_CERT_DIGEST, md, mdlen);
+	      cfg->REQUIRE_PEER_CERT = 1;
 	    }
 	    BIO_free(bio);
 	  }
@@ -1526,8 +1526,16 @@ void config_parse_cli(int argc, char **argv, stud_config *cfg) {
       cfg->ETYPE = ENC_TLS;
   }
 
+  if (!config_param_bind_addr(cfg->FRONTADDR)) {
+      config_die("Configuration error on frontend address");
+  }
+
   if (client) {
       cfg->PMODE = SSL_CLIENT;
+  } else {
+      if (!config_param_bind_addr(cfg->BACKADDR)) {
+	  config_die("Configuration error on backend address");
+      }
   }
 
   if (cfg->WRITE_IP_OCTET && cfg->WRITE_PROXY_LINE)
