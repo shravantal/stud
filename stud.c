@@ -92,6 +92,7 @@ static pid_t *child_pids;
 static SSL_CTX *ssl_ctx_sha2;
 static SSL_CTX *ssl_ctx;
 static SSL_SESSION *client_session;
+static unsigned char ssl_session_id_context[4] = "\xde\xca\xfa\xce";
 
 #define LOG_REOPEN_INTERVAL 60
 static FILE* logf;
@@ -734,6 +735,40 @@ RSA *load_rsa_privatekey(SSL_CTX *ctx, const char *file) {
     return rsa;
 }
 
+static int
+verify_callback (int ok, X509_STORE_CTX *ctx)
+{
+    SSL* ssl = X509_STORE_CTX_get_ex_data(ctx, SSL_get_ex_data_X509_STORE_CTX_idx());
+    proxystate *ps = (proxystate *)SSL_get_app_data(ssl);
+
+    LOGPROXY(ps, "ssl verify callback ok=%d\n", ok);
+    if (ok) {
+        if (CONFIG->PINNED_CERT_DIGEST) {
+            X509 *cert;
+	    unsigned char md[EVP_MAX_MD_SIZE];
+	    unsigned int mdlen;
+
+	    cert = X509_STORE_CTX_get_current_cert(ctx);
+	    if (cert) {
+		if (X509_digest(cert, EVP_sha1(), md, &mdlen)) {
+		    if (memcmp(md, CONFIG->PINNED_CERT_DIGEST, mdlen)) {
+			ERRPROXY(ps, "pinned certificate mismatch\n");
+			ok = 0;
+		    } else {
+			LOGPROXY(ps, "pinned peer certificate verified\n");
+		    }
+		} else {
+		    ERRPROXY(ps, "error computing pinned certificate digest\n");
+		    ok = 0;
+		}
+	    } else {
+		ERRPROXY(ps, "no certificate was supplied\n");
+	    }
+	}
+    }
+    return ok;
+}
+
 /* Init library and load specified certificate.
  * Establishes a SSL_ctx, to act as a template for
  * each connection */
@@ -812,11 +847,13 @@ SSL_CTX * init_openssl(int sha2) {
         exit(1);
     }
 
+    SSL_CTX_set_session_id_context(ctx, ssl_session_id_context, sizeof(ssl_session_id_context));
+
     if (CONFIG->PMODE == SSL_CLIENT)
         return ctx;
 
-    if (CONFIG->REQUIRE_CLIENT_CERT) {
-	SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, NULL);
+    if (CONFIG->REQUIRE_PEER_CERT) {
+	SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, verify_callback);
     }
 
 #ifndef OPENSSL_NO_DH
@@ -1091,7 +1128,7 @@ parse_backend_host (proxystate* ps, char* ip)
     }
 
     for (; a; a = a->next) {
-	if (config_same_subnet(a->addr, addr->ai_addr)) {
+	if (config_same_subnet(a->addr->ai_addr, addr->ai_addr, a->prefix_bits)) {
 	    break;
 	}
     }
@@ -1186,7 +1223,7 @@ static void clear_read(struct ev_loop *loop, ev_io *w, int revents) {
 	    }
 	    memcpy(buf, s+2, t);
 	} else {
-	    ERRPROXY(ps, "bad backend connect string");
+	    ERRPROXY(ps, "bad backend connect string\n");
 	    shutdown_proxy(ps, SHUTDOWN_CONNECT);
 	    return;
 	}
@@ -1330,27 +1367,24 @@ static void end_handshake(proxystate *ps) {
     ev_timer_stop(loop, &ps->ev_t_handshake);
 
     {
-	int cert_error = 0;
-	X509* peer_cert = SSL_get_peer_certificate(ps->ssl);
+	X509* cert;
+	int cert_ok = 1;
 
-	if (peer_cert == NULL && CONFIG->REQUIRE_PEER_CERT) {
+	cert = SSL_get_peer_certificate(ps->ssl);
+	if (cert == NULL && CONFIG->REQUIRE_PEER_CERT) {
 	    ERRPROXY(ps, "no peer certificate provided\n");
-	    cert_error = 1;
-	}
-	if (CONFIG->PINNED_CERT) {
-	    unsigned char md[EVP_MAX_MD_SIZE];
-	    unsigned int mdlen;
-
-	    mdlen = sizeof(md);
-	    X509_digest(peer_cert, EVP_sha1(), md, &mdlen);
-	    if (memcmp(md, CONFIG->PINNED_CERT, mdlen)) {
-		ERRPROXY(ps, "pinned certificate mismatch\n");
-		cert_error = 1;
+	    cert_ok = 0;
+	} else {
+	    int result = SSL_get_verify_result(ps->ssl);
+	    if (result == X509_V_OK) {
+		LOGPROXY(ps, "peer certificate verified\n");
+	    } else {
+		ERRPROXY(ps, "peer certificate verification failure: %d", result);
+		cert_ok = 0;
 	    }
-	    LOGPROXY(ps, "pinned peer certificate verified\n");
 	}
-	X509_free(peer_cert);
-	if (cert_error) {
+	X509_free(cert);
+	if (!cert_ok) {
 	    shutdown_proxy(ps, SHUTDOWN_SSLERR);
 	    return;
 	}
@@ -1513,7 +1547,7 @@ static void client_handshake(struct ev_loop *loop, ev_io *w, int revents) {
         end_handshake(ps);
     }
     else {
-        int err = SSL_get_error(ps->ssl, t);
+	int err = SSL_get_error(ps->ssl, t);
         VERBOSEPROXY(ps,"ssl client handshake err=%d\n",err);
         if (err == SSL_ERROR_WANT_READ) {
             ev_io_stop(loop, &ps->ev_w_handshake);
@@ -1616,7 +1650,7 @@ static void ssl_write(struct ev_loop *loop, ev_io *w, int revents) {
         }
     }
     else {
-        int err = SSL_get_error(ps->ssl, t);
+	int err = SSL_get_error(ps->ssl, t);
         if (err == SSL_ERROR_WANT_READ) {
             start_handshake(ps, err);
         }

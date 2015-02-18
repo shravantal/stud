@@ -81,7 +81,7 @@ struct __stud_config {
     int RING_DATA_LEN;
     int BACKEND_CONNECT;
     int REQUIRE_PEER_CERT;
-    unsigned char* PINNED_CERT;
+    unsigned char* PINNED_CERT_DIGEST;
     char *CA_FILE;
 };
 
