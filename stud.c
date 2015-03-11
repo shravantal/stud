@@ -1626,39 +1626,41 @@ static void ssl_read(struct ev_loop *loop, ev_io *w, int revents) {
  * secure socket using OpenSSL */
 static void ssl_write(struct ev_loop *loop, ev_io *w, int revents) {
     (void) revents;
-    int t;
-    int sz;
     proxystate *ps = (proxystate *)w->data;
     assert(!ringbuffer_is_empty(&ps->ring_clear2ssl));
-    char * next = ringbuffer_read_next(&ps->ring_clear2ssl, &sz);
-    t = SSL_write(ps->ssl, next, sz);
-    if (t > 0) {
-        if (t == sz) {
-            ringbuffer_read_pop(&ps->ring_clear2ssl);
-            if (ps->clear_connected)
-                safe_enable_io(ps, &ps->ev_r_clear); // can be re-enabled b/c we've popped
-            if (ringbuffer_is_empty(&ps->ring_clear2ssl)) {
-                if (ps->want_shutdown) {
-                    shutdown_proxy(ps, SHUTDOWN_CLEAR);
-                    return;
-                }
-                ev_io_stop(loop, &ps->ev_w_ssl);
-            }
-        }
-        else {
-            ringbuffer_read_skip(&ps->ring_clear2ssl, t);
-        }
-    }
-    else {
-	int err = SSL_get_error(ps->ssl, t);
-        if (err == SSL_ERROR_WANT_READ) {
-            start_handshake(ps, err);
-        }
-        else if (err == SSL_ERROR_WANT_WRITE) {} /* incomplete SSL data */
-        else {
-            SSLERR(ps, "write", err, w->fd);
-            shutdown_proxy(ps, SHUTDOWN_SSLERR);
-        }
+    do {
+        int sz;
+	char * next = ringbuffer_read_next(&ps->ring_clear2ssl, &sz);
+	int t = SSL_write(ps->ssl, next, sz);
+	if (t > 0) {
+	    if (t == sz) {
+		ringbuffer_read_pop(&ps->ring_clear2ssl);
+		if (ps->clear_connected) {
+		    safe_enable_io(ps, &ps->ev_r_clear); // can be re-enabled b/c we've popped
+		}
+	    }
+	    else {
+		ringbuffer_read_skip(&ps->ring_clear2ssl, t);
+		return;
+	    }
+	}
+	else {
+	    int err = SSL_get_error(ps->ssl, t);
+	    if (err == SSL_ERROR_WANT_READ) {
+		start_handshake(ps, err);
+	    }
+	    else if (err == SSL_ERROR_WANT_WRITE) {} /* incomplete SSL data */
+	    else {
+		SSLERR(ps, "write", err, w->fd);
+		shutdown_proxy(ps, SHUTDOWN_SSLERR);
+	    }
+	    return;
+	}
+    } while (!ringbuffer_is_empty(&ps->ring_clear2ssl));
+    if (ps->want_shutdown) {
+	shutdown_proxy(ps, SHUTDOWN_CLEAR);
+    } else {
+	ev_io_stop(loop, &ps->ev_w_ssl);
     }
 }
 
