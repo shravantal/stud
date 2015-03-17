@@ -118,7 +118,7 @@ void config_die (char *fmt, ...) {
   exit(1);
 }
 
-int config_param_val_addr (char* ip, char* port, struct stud_config_addr** cfg);
+int config_param_val_addr (char* ip, char* port, struct stud_config_addr** cfg, int passive);
 
 stud_config * config_new (void) {
   stud_config *r = NULL;
@@ -137,10 +137,10 @@ stud_config * config_new (void) {
   r->CHROOT             = NULL;
   r->UID                = -1;
   r->GID                = -1;
-  config_param_val_addr(NULL, strdup("8443"), &r->FRONTADDR);
+  config_param_val_addr(NULL, strdup("8443"), &r->FRONTADDR, 1);
   r->BACKADDR		= NULL;
   r->BACKADDR_DEFAULT	= NULL;
-  config_param_val_addr(strdup("127.0.0.1"), strdup("8000"), &r->BACKADDR_DEFAULT);
+  config_param_val_addr(strdup("127.0.0.1"), strdup("8000"), &r->BACKADDR_DEFAULT, 0);
   r->NCORES             = 1;
   r->CERT_FILE          = NULL;
   r->CERT_FILE_SHA2     = NULL;
@@ -471,7 +471,7 @@ int config_param_val_intl_pos (char *str, long int *dst) {
   return 1;
 }
 
-int config_param_val_addr (char* ip, char* port, struct stud_config_addr** cfg)
+int config_param_val_addr (char* ip, char* port, struct stud_config_addr** cfg, int passive)
 {
     /* backaddr */
     struct addrinfo hints;
@@ -493,7 +493,7 @@ int config_param_val_addr (char* ip, char* port, struct stud_config_addr** cfg)
     memset(&hints, 0, sizeof hints);
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
-    hints.ai_flags = 0;
+    hints.ai_flags = passive ? AI_PASSIVE : 0;
     const int gai_err = getaddrinfo(ip, port, &hints, &addr);
     if (gai_err != 0) {
 	config_error_set("Unable to resolve backend address: %s:%s: %s", ip, port, gai_strerror(gai_err));
@@ -684,7 +684,7 @@ void config_param_validate (char *k, char *v, stud_config *cfg, char *file, int 
     char* ip;
     char* port;
     if (!config_param_host_port_wildcard(v, &ip, &port, 1)
-	|| !config_param_val_addr(ip, port, &cfg->FRONTADDR))
+	|| !config_param_val_addr(ip, port, &cfg->FRONTADDR, 1))
     {
 	r = 0;
     }
@@ -695,7 +695,7 @@ void config_param_validate (char *k, char *v, stud_config *cfg, char *file, int 
     if (!config_param_host_port(v, &ip, &port)) {
 	r = 0;
     } else {
-	config_param_val_addr(ip, port, &cfg->BACKADDR);
+	config_param_val_addr(ip, port, &cfg->BACKADDR, 0);
     }
   }
   else if (strcmp(k, CFG_WORKERS) == 0) {
