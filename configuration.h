@@ -83,6 +83,7 @@ struct __stud_config {
     int REQUIRE_PEER_CERT;
     unsigned char* PINNED_CERT_DIGEST;
     char *CA_FILE;
+    int MAX_DH_USES;
 };
 
 typedef struct __stud_config stud_config;

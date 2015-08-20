@@ -64,6 +64,7 @@
 #define CFG_PINNED_CERT_FILE "pinned-certificate-file"
 #define CFG_CA_FILE "ca-file"
 #define CFG_CLIENT_MODE "client-mode"
+#define CFG_MAX_DH_USES "max-dh-uses"
 
 #ifdef USE_SHARED_CACHE
   #define CFG_SHARED_CACHE "shared-cache"
@@ -178,6 +179,7 @@ stud_config * config_new (void) {
 
   r->RING_SLOTS = 0;
   r->RING_DATA_LEN = 0;
+  r->MAX_DH_USES = 1000;
 
   r->REQUIRE_PEER_CERT = 0;
   r->PINNED_CERT_DIGEST = NULL;
@@ -934,6 +936,9 @@ void config_param_validate (char *k, char *v, stud_config *cfg, char *file, int 
       if ((r = config_param_val_bool(v, &val))) {
 	  cfg->PMODE = val ? SSL_CLIENT : SSL_SERVER;
       }
+  }
+  else if (strcmp(k, CFG_MAX_DH_USES) == 0) {
+      r = config_param_val_int_pos(v, &cfg->MAX_DH_USES);
   }
   else {
     fprintf(
