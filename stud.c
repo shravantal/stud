@@ -1001,15 +1001,17 @@ static struct stud_config_addr* get_backaddr ()
 /* Initiate a clear-text nonblocking connect() to the backend IP on behalf
  * of a newly connected upstream (encrypted) client*/
 static int create_back_socket(const struct stud_config_addr* addr) {
-    int s = socket(addr->addr->ai_family, SOCK_STREAM, IPPROTO_TCP);
+    int s = socket(addr->addr->ai_family, addr->addr->ai_socktype, addr->addr->ai_protocol);
 
     if (s == -1)
       return -1;
 
     int flag = 1;
-    int ret = setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (char *)&flag, sizeof(flag));
-    if (ret == -1) {
-      ERR("Couldn't setsockopt to backend (TCP_NODELAY): %s\n", strerror(errno));
+    if (addr->addr->ai_protocol == IPPROTO_TCP) {
+      int ret = setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (char *)&flag, sizeof(flag));
+      if (ret == -1) {
+        ERR("Couldn't setsockopt to backend (TCP_NODELAY): %s\n", strerror(errno));
+      }
     }
     setnonblocking(s);
 

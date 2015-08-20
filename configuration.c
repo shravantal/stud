@@ -19,6 +19,7 @@
 #include <sys/stat.h>
 #include <syslog.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <netdb.h>
 #include <ifaddrs.h>
 #include <netinet/in.h>
@@ -374,7 +375,14 @@ int config_param_host_port_wildcard (char *str, char **addr, char **port, int wi
   memset(addr_buf, '\0', sizeof(addr_buf));
   
   // NEW FORMAT: [address]:port
-  if (*str == '[') {
+  if (*str == '/') {
+    // Unix socket
+    memcpy(addr_buf, str, len);
+    *addr = strdup(addr_buf);
+    *port = strdup(port_buf);
+    return 1;
+  }
+  else if (*str == '[') {
     char *ptr = str + 1;
     char *x = strrchr(ptr, ']');
     if (x == NULL) {
@@ -480,27 +488,38 @@ int config_param_val_addr (char* ip, char* port, struct stud_config_addr** cfg, 
     struct addrinfo* addr;
     int bits = 0;
 
-    {
-	char *x = ip ? strchr(ip, '/') : NULL;
-	if (x) {
-	    *x = 0;
-	    bits = atoi(x+1);
-	    if (bits < 1 || bits > 127) {
-		config_error_set("Invalid address prefix bits: '%s'", x+1);
-		return 0;
-	    }
-	}
+    if (ip && *ip == '/') {
+      addr = (struct addrinfo *)malloc(sizeof(struct addrinfo));
+      addr->ai_socktype = SOCK_STREAM;
+      addr->ai_addrlen = sizeof(struct sockaddr_un);
+      addr->ai_addr = (struct sockaddr*)malloc(addr->ai_addrlen);
+      struct sockaddr_un* un_addr = (struct sockaddr_un*) addr->ai_addr;
+      addr->ai_family = un_addr->sun_family = AF_LOCAL;
+      strncpy(un_addr->sun_path, ip, sizeof(un_addr->sun_path));
     }
+    else {
+      {
+      char *x = ip ? strchr(ip, '/') : NULL;
+      if (x) {
+          *x = 0;
+          bits = atoi(x+1);
+          if (bits < 1 || bits > 127) {
+          config_error_set("Invalid address prefix bits: '%s'", x+1);
+          return 0;
+          }
+      }
+      }
 
-    memset(&hints, 0, sizeof hints);
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_flags = passive ? AI_PASSIVE : 0;
-    const int gai_err = getaddrinfo(ip, port, &hints, &addr);
-    if (gai_err != 0) {
-	config_error_set("Unable to resolve backend address: %s:%s: %s", ip, port, gai_strerror(gai_err));
-	return 0;
-    } else {
+      memset(&hints, 0, sizeof hints);
+      hints.ai_family = AF_UNSPEC;
+      hints.ai_socktype = SOCK_STREAM;
+      hints.ai_flags = passive ? AI_PASSIVE : 0;
+      const int gai_err = getaddrinfo(ip, port, &hints, &addr);
+      if (gai_err != 0) {
+      config_error_set("Unable to resolve backend address: %s:%s: %s", ip, port, gai_strerror(gai_err));
+      return 0;
+      }
+    }
 	struct stud_config_addr* ipp = (struct stud_config_addr*)malloc(sizeof(*ipp));
 	ipp->addr = addr;
 	ipp->IP = ip;
@@ -508,7 +527,6 @@ int config_param_val_addr (char* ip, char* port, struct stud_config_addr** cfg, 
 	ipp->prefix_bits = bits;
 	ipp->next = *cfg;
 	*cfg = ipp;
-    }
     return 1;
 }
 
