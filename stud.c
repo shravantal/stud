@@ -93,8 +93,6 @@ static SSL_CTX *ssl_ctx_sha2;
 static SSL_CTX *ssl_ctx;
 static SSL_SESSION *client_session;
 static unsigned char ssl_session_id_context[4] = "\xde\xca\xfa\xce";
-static DH *dh_params;
-static int dh_uses_left;
 
 #define LOG_REOPEN_INTERVAL 60
 static FILE* logf;
@@ -364,24 +362,6 @@ void die (char *fmt, ...) {
 }
 
 #ifndef OPENSSL_NO_DH
-DH* diffie_hellman_callback(SSL *ssl, int is_export, int keylength) {
-    (void) ssl;
-    (void) is_export;
-    (void) keylength;
-    DH* dh;
-    if (--dh_uses_left == 0) {
-        dh_uses_left = CONFIG->MAX_DH_USES;
-        do {
-            dh = DHparams_dup(dh_params);
-            DH_generate_key(dh);
-        } while (BN_num_bytes(dh->pub_key) != DH_size(dh));
-        DH_free(dh_params);
-        dh_params = dh;
-    }
-
-    return dh_params;
-}
-
 static int init_dh(SSL_CTX *ctx, const char *cert) {
     DH *dh;
     BIO *bio;
@@ -402,14 +382,7 @@ static int init_dh(SSL_CTX *ctx, const char *cert) {
     }
 
     LOG("{core} Using DH parameters from %s\n", cert);
-    if (dh_params) {
-        DH_free(dh_params);
-    }
-    dh_params = DHparams_dup(dh);
-    dh_uses_left = 1;
-
-    SSL_CTX_set_tmp_dh_callback(ctx, diffie_hellman_callback);
-
+    SSL_CTX_set_tmp_dh(ctx, dh);
     LOG("{core} DH initialized with %d bit key\n", 8*DH_size(dh));
     DH_free(dh);
 
