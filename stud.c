@@ -392,6 +392,7 @@ static int init_dh(SSL_CTX *ctx, const char *cert) {
     ecdh = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
     SSL_CTX_set_tmp_ecdh(ctx,ecdh);
     EC_KEY_free(ecdh);
+    SSL_CTX_set_options(ctx, SSL_OP_SINGLE_ECDH_USE);
     LOG("{core} ECDH Initialized with NIST P-256\n");
 #endif /* NID_X9_62_prime256v1 */
 #endif /* OPENSSL_NO_EC */
