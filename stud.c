@@ -462,6 +462,26 @@ int servername_callback(SSL *ssl, int *al, void *data) {
     return SSL_TLSEXT_ERR_NOACK; // NOACK because we didn't actually use the servername info
 }
 
+/* ALPN callback, always negotiate to HTTP/1.1; could be configurable if we care later
+ * negotiating ALPN enables TLS false start with many clients, so we'll get their request
+ * one round trip sooner
+ */
+
+int alpn_callback(SSL *ssl, const unsigned char **out, unsigned char *outlen,
+                  const unsigned char *in, unsigned int inlen, void *arg) {
+    int selected;
+    (void) arg;
+    (void) ssl;
+    static unsigned char alpn[] = { 8, 'h', 't', 't', 'p', '/', '1', '.', '1'};
+    unsigned int length = sizeof(alpn);
+
+    selected = SSL_select_next_proto((unsigned char **)out, outlen, alpn, length, in, inlen);
+    if (selected == OPENSSL_NPN_NEGOTIATED) {
+        return SSL_TLSEXT_ERR_OK;
+    }
+    return SSL_TLSEXT_ERR_NOACK;
+}
+
 #ifdef USE_SHARED_CACHE
 
 /* Handle incoming message updates */
@@ -796,6 +816,7 @@ SSL_CTX * init_openssl(int sha2) {
     SSL_CTX_set_options(ctx, ssloptions);
     SSL_CTX_set_info_callback(ctx, info_callback);
     SSL_CTX_set_tlsext_servername_callback(ctx, servername_callback);
+    SSL_CTX_set_alpn_select_cb(ctx, alpn_callback, NULL);
 
     if (CONFIG->CA_FILE) {
 	SSL_CTX_load_verify_locations(ctx, CONFIG->CA_FILE, NULL);
